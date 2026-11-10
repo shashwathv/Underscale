@@ -1,0 +1,757 @@
+diff --git a/data/dbus-interfaces/org.gnome.Mutter.DisplayConfig.xml b/data/dbus-interfaces/org.gnome.Mutter.DisplayConfig.xml
+index 1fdc2ef..c5a8d74 100644
+--- a/data/dbus-interfaces/org.gnome.Mutter.DisplayConfig.xml
++++ b/data/dbus-interfaces/org.gnome.Mutter.DisplayConfig.xml
+@@ -545,6 +545,23 @@
+       <arg name="ctm" direction="in" type="(ttttttttt)" />
+     </method>
+ 
++    <!--
++        SetUnderscanAmount:
++        @connector: connector name of the monitor, as in GetCurrentState
++        @amount: fraction of the picture given up to borders, 0.0 to 0.25
++
++        Shrinks the picture of an external monitor inside its video signal,
++        leaving black borders, without changing the monitor's resolution.
++        Meant for TVs that crop the edges of the picture (overscan). Takes
++        effect immediately and is not stored; 0.0 turns it off. The current
++        value is the "underscan-amount" (d) monitor property in
++        GetCurrentState, present on monitors that support this.
++    -->
++    <method name="SetUnderscanAmount">
++      <arg name="connector" direction="in" type="s" />
++      <arg name="amount" direction="in" type="d" />
++    </method>
++
+     <!--
+ 	HasExternalmonitor:
+ 
+diff --git a/src/backends/meta-monitor-manager-private.h b/src/backends/meta-monitor-manager-private.h
+index cfce38d..793a8c2 100644
+--- a/src/backends/meta-monitor-manager-private.h
++++ b/src/backends/meta-monitor-manager-private.h
+@@ -157,6 +157,9 @@ struct _MetaMonitorManager
+   MetaMonitorSwitchConfigType current_switch_config;
+ 
+   MetaPrivacyScreenChangeState privacy_screen_change_state;
++
++  /* Connector name -> double *, fraction of the picture given up to borders */
++  GHashTable *underscan_amounts;
+ };
+ 
+ /**
+@@ -238,6 +241,11 @@ struct _MetaMonitorManagerClass
+   void (* set_output_ctm) (MetaOutput    *output,
+                            const MetaCtm *ctm);
+ 
++  gboolean (* set_underscan_amount) (MetaMonitorManager  *manager,
++                                     MetaMonitor         *monitor,
++                                     double               amount,
++                                     GError             **error);
++
+   MetaVirtualMonitor * (* create_virtual_monitor) (MetaMonitorManager            *manager,
+                                                    const MetaVirtualMonitorInfo  *info,
+                                                    GError                       **error);
+@@ -245,6 +253,9 @@ struct _MetaMonitorManagerClass
+ 
+ void                meta_monitor_manager_setup (MetaMonitorManager *manager);
+ 
++double              meta_monitor_manager_get_underscan_amount (MetaMonitorManager *manager,
++                                                               const char         *connector);
++
+ META_EXPORT_TEST
+ void                meta_monitor_manager_rebuild (MetaMonitorManager *manager,
+                                                   MetaMonitorsConfig *config);
+diff --git a/src/backends/meta-monitor-manager.c b/src/backends/meta-monitor-manager.c
+index 7495810..28558ad 100644
+--- a/src/backends/meta-monitor-manager.c
++++ b/src/backends/meta-monitor-manager.c
+@@ -171,6 +171,22 @@ meta_monitor_manager_init (MetaMonitorManager *manager)
+ 
+   priv->power_save_mode = META_POWER_SAVE_ON;
+   priv->power_save_inhibit_orientation_tracking = FALSE;
++
++  manager->underscan_amounts =
++    g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
++}
++
++double
++meta_monitor_manager_get_underscan_amount (MetaMonitorManager *manager,
++                                           const char         *connector)
++{
++  double *amount;
++
++  if (!connector)
++    return 0.0;
++
++  amount = g_hash_table_lookup (manager->underscan_amounts, connector);
++  return amount ? *amount : 0.0;
+ }
+ 
+ static void
+@@ -1477,6 +1493,8 @@ meta_monitor_manager_finalize (GObject *object)
+ 
+   g_warn_if_fail (!priv->virtual_monitors);
+ 
++  g_clear_pointer (&manager->underscan_amounts, g_hash_table_unref);
++
+   G_OBJECT_CLASS (meta_monitor_manager_parent_class)->finalize (object);
+ }
+ 
+@@ -2280,6 +2298,18 @@ meta_monitor_manager_handle_get_current_state (MetaDBusDisplayConfig *skeleton,
+                              "is-builtin",
+                              g_variant_new_boolean (is_builtin));
+ 
++      if (!is_builtin &&
++          META_MONITOR_MANAGER_GET_CLASS (manager)->set_underscan_amount)
++        {
++          double underscan_amount =
++            meta_monitor_manager_get_underscan_amount (manager,
++                                                       meta_monitor_get_connector (monitor));
++
++          g_variant_builder_add (&monitor_properties_builder, "{sv}",
++                                 "underscan-amount",
++                                 g_variant_new_double (underscan_amount));
++        }
++
+       display_name = meta_monitor_get_display_name (monitor);
+       g_variant_builder_add (&monitor_properties_builder, "{sv}",
+                              "display-name",
+@@ -3449,9 +3479,98 @@ meta_monitor_manager_handle_set_output_ctm  (MetaDBusDisplayConfig *skeleton,
+   return G_DBUS_METHOD_INVOCATION_HANDLED;
+ }
+ 
++static gboolean
++meta_monitor_manager_handle_set_underscan_amount (MetaDBusDisplayConfig *skeleton,
++                                                  GDBusMethodInvocation *invocation,
++                                                  const char            *connector,
++                                                  double                 amount,
++                                                  MetaMonitorManager    *manager)
++{
++  MetaMonitorManagerClass *klass = META_MONITOR_MANAGER_GET_CLASS (manager);
++  MetaMonitor *monitor;
++  double old_amount;
++  g_autoptr (GError) error = NULL;
++
++  if (!klass->set_underscan_amount)
++    {
++      g_dbus_method_invocation_return_error (invocation, G_DBUS_ERROR,
++                                             G_DBUS_ERROR_NOT_SUPPORTED,
++                                             "Underscan is not supported by this backend");
++      return G_DBUS_METHOD_INVOCATION_HANDLED;
++    }
++
++  if (!isfinite (amount) || amount < 0.0 || amount > 0.25)
++    {
++      g_dbus_method_invocation_return_error (invocation, G_DBUS_ERROR,
++                                             G_DBUS_ERROR_INVALID_ARGS,
++                                             "Underscan amount must be between 0.0 and 0.25");
++      return G_DBUS_METHOD_INVOCATION_HANDLED;
++    }
++
++  monitor = meta_monitor_manager_get_monitor_from_connector (manager,
++                                                             connector);
++  if (!monitor)
++    {
++      g_dbus_method_invocation_return_error (invocation, G_DBUS_ERROR,
++                                             G_DBUS_ERROR_INVALID_ARGS,
++                                             "Unknown connector '%s'",
++                                             connector);
++      return G_DBUS_METHOD_INVOCATION_HANDLED;
++    }
++
++  if (meta_monitor_is_builtin (monitor))
++    {
++      g_dbus_method_invocation_return_error (invocation, G_DBUS_ERROR,
++                                             G_DBUS_ERROR_NOT_SUPPORTED,
++                                             "Underscan only applies to external displays");
++      return G_DBUS_METHOD_INVOCATION_HANDLED;
++    }
++
++  old_amount = meta_monitor_manager_get_underscan_amount (manager, connector);
++
++  if (amount > 0.0)
++    {
++      g_hash_table_insert (manager->underscan_amounts,
++                           g_strdup (connector),
++                           g_memdup2 (&amount, sizeof (double)));
++    }
++  else
++    {
++      g_hash_table_remove (manager->underscan_amounts, connector);
++    }
++
++  if (!klass->set_underscan_amount (manager, monitor, amount, &error))
++    {
++      if (old_amount > 0.0)
++        {
++          g_hash_table_insert (manager->underscan_amounts,
++                               g_strdup (connector),
++                               g_memdup2 (&old_amount, sizeof (double)));
++        }
++      else
++        {
++          g_hash_table_remove (manager->underscan_amounts, connector);
++        }
++
++      g_dbus_method_invocation_return_error (invocation, G_DBUS_ERROR,
++                                             G_DBUS_ERROR_FAILED,
++                                             "%s", error->message);
++      return G_DBUS_METHOD_INVOCATION_HANDLED;
++    }
++
++  meta_dbus_display_config_complete_set_underscan_amount (skeleton,
++                                                          invocation);
++
++  return G_DBUS_METHOD_INVOCATION_HANDLED;
++}
++
+ static void
+ monitor_manager_setup_dbus_config_handlers (MetaMonitorManager *manager)
+ {
++  g_signal_connect_object (manager->display_config,
++                           "handle-set-underscan-amount",
++                           G_CALLBACK (meta_monitor_manager_handle_set_underscan_amount),
++                           manager, G_CONNECT_DEFAULT);
+   g_signal_connect_object (manager->display_config, "handle-get-resources",
+                            G_CALLBACK (meta_monitor_manager_handle_get_resources),
+                            manager, G_CONNECT_DEFAULT);
+diff --git a/src/backends/native/meta-kms-cursor-manager.c b/src/backends/native/meta-kms-cursor-manager.c
+index e4cef1d..fc38a3c 100644
+--- a/src/backends/native/meta-kms-cursor-manager.c
++++ b/src/backends/native/meta-kms-cursor-manager.c
+@@ -23,6 +23,7 @@
+ 
+ #include "backends/native/meta-kms-crtc.h"
+ #include "backends/native/meta-kms-impl.h"
++#include "backends/native/meta-kms-underscan.h"
+ #include "backends/native/meta-kms-device-private.h"
+ #include "backends/native/meta-kms-update-private.h"
+ #include "backends/native/meta-thread.h"
+@@ -47,6 +48,7 @@ typedef struct _CrtcStateImpl
+   MetaKmsPlane *cursor_plane;
+   graphene_rect_t layout;
+   float scale;
++  double underscan;
+   MtkMonitorTransform transform;
+   MetaDrmBuffer *buffer;
+   unsigned int sprite_width, sprite_height;
+@@ -278,6 +280,13 @@ calculate_cursor_buffer_rect (CrtcStateImpl          *crtc_state_impl,
+                                          &crtc_width, &crtc_height,
+                                          &crtc_x, &crtc_y);
+ 
++  /* When the primary plane is scaled into an underscanned area, the pointer
++   * position has to follow it. The sprite itself keeps its size.
++   */
++  meta_kms_underscan_map_point (crtc_width, crtc_height,
++                                crtc_state_impl->underscan,
++                                &crtc_x, &crtc_y);
++
+   buffer_width = meta_drm_buffer_get_width (buffer);
+   buffer_height = meta_drm_buffer_get_height (buffer);
+ 
+@@ -849,6 +858,55 @@ meta_kms_cursor_manager_update_sprite (MetaKmsCursorManager   *cursor_manager,
+                               NULL, NULL);
+ }
+ 
++typedef struct
++{
++  MetaKmsCrtc *crtc;
++  double underscan;
++} SetUnderscanData;
++
++static gpointer
++set_crtc_underscan_in_impl (MetaThreadImpl  *thread_impl,
++                            gpointer         user_data,
++                            GError         **error)
++{
++  MetaKmsCursorManagerImpl *cursor_manager_impl =
++    ensure_cursor_manager_impl (META_KMS_IMPL (thread_impl));
++  SetUnderscanData *data = user_data;
++  MetaKmsDevice *device = meta_kms_crtc_get_device (data->crtc);
++  MetaKmsImplDevice *impl_device =
++    meta_kms_device_get_impl_device (device);
++  CrtcStateImpl *crtc_state_impl;
++
++  crtc_state_impl = find_crtc_state (cursor_manager_impl, data->crtc);
++  if (!crtc_state_impl)
++    return NULL;
++
++  crtc_state_impl->underscan = data->underscan;
++  crtc_state_impl->cursor_invalidated = TRUE;
++
++  meta_kms_impl_device_schedule_process (impl_device,
++                                         crtc_state_impl->crtc);
++
++  return NULL;
++}
++
++void
++meta_kms_cursor_manager_set_crtc_underscan (MetaKmsCursorManager *cursor_manager,
++                                            MetaKmsCrtc          *crtc,
++                                            double                underscan)
++{
++  SetUnderscanData *data;
++
++  data = g_new0 (SetUnderscanData, 1);
++  data->crtc = crtc;
++  data->underscan = underscan;
++
++  meta_thread_post_impl_task (META_THREAD (cursor_manager->kms),
++                              set_crtc_underscan_in_impl,
++                              data, g_free,
++                              NULL, NULL);
++}
++
+ static void
+ crtc_state_impl_clear_in_main (CrtcStateImpl *crtc_state_impl)
+ {
+@@ -915,6 +973,7 @@ update_viewports_in_impl (MetaThreadImpl  *thread_impl,
+                                  NULL);
+         }
+ 
++      crtc_state_impl->underscan = crtc_layout->underscan;
+       crtc_state_impl->cursor_invalidated = TRUE;
+       g_ptr_array_add (crtc_states, crtc_state_impl);
+     }
+diff --git a/src/backends/native/meta-kms-cursor-manager.h b/src/backends/native/meta-kms-cursor-manager.h
+index defcb78..d6c8785 100644
+--- a/src/backends/native/meta-kms-cursor-manager.h
++++ b/src/backends/native/meta-kms-cursor-manager.h
+@@ -31,6 +31,7 @@ typedef struct _MetaKmsCrtcLayout
+   MetaKmsPlane *cursor_plane;
+   graphene_rect_t layout;
+   float scale;
++  double underscan;
+ } MetaKmsCrtcLayout;
+ 
+ typedef void (* MetaKmsCursorQueryInImpl) (float    *x,
+@@ -48,6 +49,10 @@ void meta_kms_cursor_manager_set_query_func (MetaKmsCursorManager     *cursor_ma
+                                              gpointer                  user_data,
+                                              GDestroyNotify            free_func);
+ 
++void meta_kms_cursor_manager_set_crtc_underscan (MetaKmsCursorManager *cursor_manager,
++                                                 MetaKmsCrtc          *crtc,
++                                                 double                underscan);
++
+ META_EXPORT_TEST
+ void meta_kms_cursor_manager_position_changed_in_input_impl (MetaKmsCursorManager   *cursor_manager,
+                                                              const graphene_point_t *position);
+diff --git a/src/backends/native/meta-kms-underscan.h b/src/backends/native/meta-kms-underscan.h
+new file mode 100644
+index 0000000..d11a2d4
+--- /dev/null
++++ b/src/backends/native/meta-kms-underscan.h
+@@ -0,0 +1,107 @@
++/*
++ * Underscan by scaling the primary plane into a centered, inset area of the
++ * CRTC. The helpers here are shared by the primary plane assignment and the
++ * hardware cursor positioning so both always agree on the geometry.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++#pragma once
++
++#include <math.h>
++
++#include "mtk/mtk.h"
++
++/* Largest fraction of the picture that may be given up to borders. */
++#define META_KMS_UNDERSCAN_MAX_AMOUNT 0.25
++
++/*
++ * The area of a @width x @height CRTC that the picture occupies when
++ * underscanning by @amount (0.0 = whole CRTC). Sizes are kept even and the
++ * area is centered.
++ */
++static inline void
++meta_kms_underscan_get_area (int           width,
++                             int           height,
++                             double        amount,
++                             MtkRectangle *area)
++{
++  int area_width, area_height;
++
++  if (amount <= 0.0)
++    {
++      *area = (MtkRectangle) { 0, 0, width, height };
++      return;
++    }
++
++  amount = MIN (amount, META_KMS_UNDERSCAN_MAX_AMOUNT);
++
++  area_width = ((int) round (width * (1.0 - amount))) & ~1;
++  area_height = ((int) round (height * (1.0 - amount))) & ~1;
++
++  *area = (MtkRectangle) {
++    .x = (width - area_width) / 2,
++    .y = (height - area_height) / 2,
++    .width = area_width,
++    .height = area_height,
++  };
++}
++
++/* Map a point in full CRTC coordinates into the underscanned area. */
++static inline void
++meta_kms_underscan_map_point (int     width,
++                              int     height,
++                              double  amount,
++                              int    *x,
++                              int    *y)
++{
++  MtkRectangle area;
++
++  if (amount <= 0.0 || width <= 0 || height <= 0)
++    return;
++
++  meta_kms_underscan_get_area (width, height, amount, &area);
++  *x = area.x + (int) round ((double) *x * area.width / width);
++  *y = area.y + (int) round ((double) *y * area.height / height);
++}
++
++/* Map a rectangle in full CRTC coordinates into the underscanned area. */
++static inline void
++meta_kms_underscan_map_rect (int           width,
++                             int           height,
++                             double        amount,
++                             MtkRectangle *rect)
++{
++  MtkRectangle area;
++  int x1, y1, x2, y2;
++
++  if (amount <= 0.0 || width <= 0 || height <= 0)
++    return;
++
++  meta_kms_underscan_get_area (width, height, amount, &area);
++
++  x1 = area.x + (int) round ((double) rect->x * area.width / width);
++  y1 = area.y + (int) round ((double) rect->y * area.height / height);
++  x2 = area.x + (int) round ((double) (rect->x + rect->width) *
++                             area.width / width);
++  y2 = area.y + (int) round ((double) (rect->y + rect->height) *
++                             area.height / height);
++
++  *rect = (MtkRectangle) {
++    .x = x1,
++    .y = y1,
++    .width = x2 - x1,
++    .height = y2 - y1,
++  };
++}
+diff --git a/src/backends/native/meta-monitor-manager-native.c b/src/backends/native/meta-monitor-manager-native.c
+index 5ba768c..9a358a8 100644
+--- a/src/backends/native/meta-monitor-manager-native.c
++++ b/src/backends/native/meta-monitor-manager-native.c
+@@ -52,7 +52,9 @@
+ #include "backends/native/meta-kms-device.h"
+ #include "backends/native/meta-kms.h"
+ #include "backends/native/meta-output-kms.h"
++#include "backends/native/meta-onscreen-native.h"
+ #include "backends/native/meta-renderer-native.h"
++#include "backends/native/meta-renderer-native-private.h"
+ #include "backends/native/meta-virtual-monitor-native.h"
+ #include "clutter/clutter.h"
+ #include "meta/main.h"
+@@ -711,6 +713,39 @@ initable_iface_init (GInitableIface *initable_iface)
+   initable_iface->init = meta_monitor_manager_native_initable_init;
+ }
+ 
++static gboolean
++meta_monitor_manager_native_set_underscan_amount (MetaMonitorManager  *manager,
++                                                  MetaMonitor         *monitor,
++                                                  double               amount,
++                                                  GError             **error)
++{
++  MetaBackend *backend = meta_monitor_manager_get_backend (manager);
++  MetaRenderer *renderer = meta_backend_get_renderer (backend);
++  MetaOutput *output = meta_monitor_get_main_output (monitor);
++  MetaCrtc *crtc = meta_output_get_assigned_crtc (output);
++  MetaRendererView *view;
++  CoglFramebuffer *framebuffer;
++
++  if (crtc)
++    {
++      view = meta_renderer_get_view_for_crtc (renderer, crtc);
++      framebuffer = view ?
++        clutter_stage_view_get_onscreen (CLUTTER_STAGE_VIEW (view)) : NULL;
++
++      if (framebuffer && META_IS_ONSCREEN_NATIVE (framebuffer))
++        {
++          if (!meta_onscreen_native_test_underscan (COGL_ONSCREEN (framebuffer),
++                                                    amount, error))
++            return FALSE;
++        }
++    }
++
++  meta_renderer_native_underscan_changed (META_RENDERER_NATIVE (renderer));
++  clutter_actor_queue_redraw (meta_backend_get_stage (backend));
++
++  return TRUE;
++}
++
+ static void
+ meta_monitor_manager_native_init (MetaMonitorManagerNative *manager_native)
+ {
+@@ -749,6 +784,8 @@ meta_monitor_manager_native_class_init (MetaMonitorManagerNativeClass *klass)
+     meta_monitor_manager_native_get_default_layout_mode;
+   manager_class->create_virtual_monitor =
+     meta_monitor_manager_native_create_virtual_monitor;
++  manager_class->set_underscan_amount =
++    meta_monitor_manager_native_set_underscan_amount;
+ 
+   obj_props[PROP_NEED_OUTPUTS] =
+     g_param_spec_boolean ("needs-outputs", NULL, NULL,
+diff --git a/src/backends/native/meta-onscreen-native.c b/src/backends/native/meta-onscreen-native.c
+index a3b40df..adcfc2a 100644
+--- a/src/backends/native/meta-onscreen-native.c
++++ b/src/backends/native/meta-onscreen-native.c
+@@ -42,9 +42,11 @@
+ #include "backends/native/meta-kms-connector.h"
+ #include "backends/native/meta-kms-device.h"
+ #include "backends/native/meta-kms-plane.h"
++#include "backends/native/meta-kms-underscan.h"
+ #include "backends/native/meta-kms-utils.h"
+ #include "backends/native/meta-kms.h"
+ #include "backends/native/meta-output-kms.h"
++#include "backends/meta-monitor-manager-private.h"
+ #include "backends/native/meta-render-device-gbm.h"
+ #include "backends/native/meta-render-device.h"
+ #include "backends/native/meta-renderer-egl.h"
+@@ -729,6 +731,48 @@ assign_primary_plane (MetaCrtcKms            *crtc_kms,
+   return plane_assignment;
+ }
+ 
++double
++meta_onscreen_native_get_underscan_amount (MetaOnscreenNative *onscreen_native)
++{
++  MetaRenderer *renderer = META_RENDERER (onscreen_native->renderer_native);
++  MetaBackend *backend = meta_renderer_get_backend (renderer);
++  MetaMonitorManager *monitor_manager =
++    meta_backend_get_monitor_manager (backend);
++
++  if (!onscreen_native->output)
++    return 0.0;
++
++  return meta_monitor_manager_get_underscan_amount (monitor_manager,
++                                                    meta_output_get_name (onscreen_native->output));
++}
++
++/*
++ * Shrink a primary plane destination rectangle into the underscanned area of
++ * the CRTC. The source rectangle is left alone, so the plane gets scaled by
++ * the display hardware and the logical monitor keeps its size.
++ */
++static void
++apply_underscan_to_dst_rect (MetaOnscreenNative *onscreen_native,
++                             double              amount,
++                             MtkRectangle       *dst_rect)
++{
++  const MetaCrtcConfig *crtc_config;
++  const MetaCrtcModeInfo *crtc_mode_info;
++
++  if (amount <= 0.0)
++    return;
++
++  crtc_config = meta_crtc_get_config (onscreen_native->crtc);
++  if (!crtc_config || !crtc_config->mode)
++    return;
++
++  crtc_mode_info = meta_crtc_mode_get_info (crtc_config->mode);
++  meta_kms_underscan_map_rect (crtc_mode_info->width,
++                               crtc_mode_info->height,
++                               amount,
++                               dst_rect);
++}
++
+ static gboolean
+ meta_onscreen_native_flip_crtc (CoglOnscreen           *onscreen,
+                                 ClutterFrame           *frame,
+@@ -796,6 +840,10 @@ meta_onscreen_native_flip_crtc (CoglOnscreen           *onscreen,
+           };
+         }
+ 
++      apply_underscan_to_dst_rect (onscreen_native,
++                                   meta_onscreen_native_get_underscan_amount (onscreen_native),
++                                   &dst_rect);
++
+       plane_assignment = assign_primary_plane (crtc_kms,
+                                                buffer,
+                                                kms_update,
+@@ -2170,6 +2218,10 @@ meta_onscreen_native_is_buffer_scanout_compatible (CoglOnscreen *onscreen,
+   cogl_scanout_get_src_rect (scanout, &src_rect);
+   cogl_scanout_get_dst_rect (scanout, &dst_rect);
+ 
++  apply_underscan_to_dst_rect (onscreen_native,
++                               meta_onscreen_native_get_underscan_amount (onscreen_native),
++                               &dst_rect);
++
+   buffer = META_DRM_BUFFER (cogl_scanout_get_buffer (scanout));
+   assign_primary_plane (crtc_kms,
+                         buffer,
+@@ -2191,6 +2243,73 @@ meta_onscreen_native_is_buffer_scanout_compatible (CoglOnscreen *onscreen,
+   return result == META_KMS_FEEDBACK_PASSED;
+ }
+ 
++/*
++ * Ask the kernel whether the primary plane can be scaled into the area that
++ * underscanning by @amount needs, without changing what is on screen.
++ */
++gboolean
++meta_onscreen_native_test_underscan (CoglOnscreen  *onscreen,
++                                     double         amount,
++                                     GError       **error)
++{
++  MetaOnscreenNative *onscreen_native = META_ONSCREEN_NATIVE (onscreen);
++  MetaCrtc *crtc = onscreen_native->crtc;
++  MetaCrtcKms *crtc_kms = META_CRTC_KMS (crtc);
++  MetaGpuKms *gpu_kms;
++  MetaKmsDevice *kms_device;
++  MetaKmsUpdate *test_update;
++  MetaDrmBuffer *buffer = onscreen_native->presented_buffer;
++  g_autoptr (MetaKmsFeedback) kms_feedback = NULL;
++  graphene_rect_t src_rect;
++  MtkRectangle dst_rect;
++
++  /* Nothing presented yet: there is no buffer to test with. The first frame
++   * will be posted with the requested geometry.
++   */
++  if (!buffer || amount <= 0.0)
++    return TRUE;
++
++  gpu_kms = META_GPU_KMS (meta_crtc_get_gpu (crtc));
++  kms_device = meta_gpu_kms_get_kms_device (gpu_kms);
++
++  src_rect = (graphene_rect_t) {
++    .origin.x = 0,
++    .origin.y = 0,
++    .size.width = meta_drm_buffer_get_width (buffer),
++    .size.height = meta_drm_buffer_get_height (buffer)
++  };
++  dst_rect = (MtkRectangle) {
++    .x = 0,
++    .y = 0,
++    .width = meta_drm_buffer_get_width (buffer),
++    .height = meta_drm_buffer_get_height (buffer)
++  };
++  apply_underscan_to_dst_rect (onscreen_native, amount, &dst_rect);
++
++  test_update = meta_kms_update_new (kms_device);
++  assign_primary_plane (crtc_kms,
++                        buffer,
++                        test_update,
++                        META_KMS_ASSIGN_PLANE_FLAG_DISABLE_IMPLICIT_SYNC,
++                        &src_rect,
++                        &dst_rect);
++
++  kms_feedback =
++    meta_kms_device_process_update_sync (kms_device, test_update,
++                                         META_KMS_UPDATE_FLAG_TEST_ONLY);
++
++  if (meta_kms_feedback_get_result (kms_feedback) != META_KMS_FEEDBACK_PASSED)
++    {
++      g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
++                   "The display hardware rejected scaling the picture "
++                   "to %dx%d",
++                   dst_rect.width, dst_rect.height);
++      return FALSE;
++    }
++
++  return TRUE;
++}
++
+ gboolean
+ meta_onscreen_native_supports_direct_scanout (CoglOnscreen *onscreen)
+ {
+diff --git a/src/backends/native/meta-onscreen-native.h b/src/backends/native/meta-onscreen-native.h
+index 5a191d3..7c172ba 100644
+--- a/src/backends/native/meta-onscreen-native.h
++++ b/src/backends/native/meta-onscreen-native.h
+@@ -48,6 +48,12 @@ gboolean meta_onscreen_native_is_buffer_scanout_compatible (CoglOnscreen *onscre
+ 
+ gboolean meta_onscreen_native_supports_direct_scanout (CoglOnscreen *onscreen);
+ 
++double meta_onscreen_native_get_underscan_amount (MetaOnscreenNative *onscreen_native);
++
++gboolean meta_onscreen_native_test_underscan (CoglOnscreen  *onscreen,
++                                              double         amount,
++                                              GError       **error);
++
+ void meta_onscreen_native_discard_pending_swaps (CoglOnscreen *onscreen);
+ 
+ void meta_onscreen_native_set_view (CoglOnscreen     *onscreen,
+diff --git a/src/backends/native/meta-renderer-native-private.h b/src/backends/native/meta-renderer-native-private.h
+index bede11e..7406411 100644
+--- a/src/backends/native/meta-renderer-native-private.h
++++ b/src/backends/native/meta-renderer-native-private.h
+@@ -89,3 +89,5 @@ gboolean meta_renderer_native_pop_pending_mode_set (MetaRendererNative *renderer
+                                                     MetaRendererView   *view);
+ 
+ void meta_renderer_native_queue_modes_reset (MetaRendererNative *renderer_native);
++
++void meta_renderer_native_underscan_changed (MetaRendererNative *renderer_native);
+diff --git a/src/backends/native/meta-renderer-native.c b/src/backends/native/meta-renderer-native.c
+index 75e97dc..14ddf1d 100644
+--- a/src/backends/native/meta-renderer-native.c
++++ b/src/backends/native/meta-renderer-native.c
+@@ -687,6 +687,8 @@ meta_renderer_native_queue_modes_reset (MetaRendererNative *renderer_native)
+                                           view_layout.width,
+                                           view_layout.height),
+             .scale = view_scale,
++            .underscan =
++              meta_onscreen_native_get_underscan_amount (onscreen_native),
+           };
+           g_array_append_val (crtc_layouts, crtc_layout);
+ 
+@@ -703,6 +705,40 @@ meta_renderer_native_queue_modes_reset (MetaRendererNative *renderer_native)
+   meta_topic (META_DEBUG_KMS, "Queue mode set");
+ }
+ 
++/*
++ * The underscan amount of some output changed: tell the hardware cursor code
++ * about the new geometry. The primary plane picks it up on the next frame,
++ * which the caller is expected to schedule.
++ */
++void
++meta_renderer_native_underscan_changed (MetaRendererNative *renderer_native)
++{
++  MetaRenderer *renderer = META_RENDERER (renderer_native);
++  MetaBackend *backend = meta_renderer_get_backend (renderer);
++  MetaKms *kms = meta_backend_native_get_kms (META_BACKEND_NATIVE (backend));
++  MetaKmsCursorManager *kms_cursor_manager = meta_kms_get_cursor_manager (kms);
++  GList *l;
++
++  for (l = meta_renderer_get_views (renderer); l; l = l->next)
++    {
++      ClutterStageView *stage_view = l->data;
++      CoglFramebuffer *framebuffer =
++        clutter_stage_view_get_onscreen (stage_view);
++      MetaOnscreenNative *onscreen_native;
++      MetaCrtc *crtc;
++
++      if (!COGL_IS_ONSCREEN (framebuffer))
++        continue;
++
++      onscreen_native = META_ONSCREEN_NATIVE (framebuffer);
++      crtc = meta_onscreen_native_get_crtc (onscreen_native);
++
++      meta_kms_cursor_manager_set_crtc_underscan (kms_cursor_manager,
++                                                  meta_crtc_kms_get_kms_crtc (META_CRTC_KMS (crtc)),
++                                                  meta_onscreen_native_get_underscan_amount (onscreen_native));
++    }
++}
++
+ gboolean
+ meta_renderer_native_pop_pending_mode_set (MetaRendererNative *renderer_native,
+                                            MetaRendererView   *view)

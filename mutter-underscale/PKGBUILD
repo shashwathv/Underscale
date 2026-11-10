@@ -1,0 +1,129 @@
+# Mutter with an adjustable underscan (picture size) for external displays.
+# Based on the Arch Linux mutter 51.1-1 PKGBUILD; replaces the stock package.
+#
+# Build:    makepkg -s
+# Install:  sudo pacman -U mutter-underscale-*.pkg.tar.zst   (then log out and in)
+# Revert:   sudo pacman -U /var/cache/pacman/pkg/mutter-51.1-1-x86_64.pkg.tar.zst
+
+pkgname=mutter-underscale
+pkgver=51.1
+pkgrel=1
+pkgdesc="Window manager and compositor for GNOME, with adjustable underscan for external displays"
+url="https://gitlab.gnome.org/GNOME/mutter"
+arch=(x86_64)
+license=(GPL-2.0-or-later)
+depends=(
+  at-spi2-core
+  cairo
+  colord
+  dconf
+  egl-wayland
+  fontconfig
+  fribidi
+  gdk-pixbuf2
+  glib2
+  glibc
+  glycin
+  gnome-desktop-4
+  gnome-settings-daemon
+  graphene
+  gsettings-desktop-schemas
+  gtk4
+  harfbuzz
+  iio-sensor-proxy
+  lcms2
+  libcanberra
+  libcolord
+  libdisplay-info
+  libdrm
+  libei
+  libgcc
+  libgirepository
+  libglvnd
+  libgudev
+  libinput
+  libpipewire
+  libsysprof-capture
+  libwacom
+  libx11
+  libxau
+  libxcb
+  libxcomposite
+  libxcursor
+  libxdamage
+  libxext
+  libxfixes
+  libxi
+  libxinerama
+  libxkbcommon
+  libxrandr
+  mesa
+  pango
+  pipewire
+  pixman
+  python
+  python-argcomplete
+  python-dbus
+  python-gobject
+  startup-notification
+  systemd-libs
+  wayland
+  xorg-xwayland
+)
+makedepends=(
+  bash-completion
+  git
+  glib2-devel
+  gobject-introspection
+  meson
+  python-docutils
+  sysprof
+  wayland-protocols
+)
+optdepends=('bash-completion: Bash completions for gdctl')
+provides=("mutter=$pkgver" libmutter-51.so)
+conflicts=(mutter)
+source=(
+  "git+$url.git#tag=$pkgver"
+  "git+https://gitlab.gnome.org/GNOME/gvdb.git#commit=b54bc5da25127ef416858a3ad92e57159ff565b3"
+  0001-underscan-amount-via-plane-scaling.patch
+)
+b2sums=('0064caf6a85d9cb42d9544ad2dab31ef158a957d20d5a99aabe27f40986f128714f97a5cbe970c1aba1cb9c86f0b94f2f279a22072bbfefb9c0c7e715d7a411f'
+        'f989bc2ceb52aad3c6a23c439df3bbc672bc11d561a247d19971d30cc85ed5d42295de40f8e55b13404ed32aa44f12307c9f5b470f2e288d1c9c8329255c43bf'
+        'd114c8b5d459b0936dc678a6d9126b3506282dbb748469b740701d5b6cc43511efbc2e7d61422e6bf9353ea0501050bd2dcefd00d096956ff24aa9d494aa6433')
+
+prepare() {
+  cd mutter
+  patch -Np1 -i ../0001-underscan-amount-via-plane-scaling.patch
+}
+
+build() {
+  local meson_options=(
+    -D docs=false
+    -D installed_tests=false
+    -D tests=disabled
+  )
+
+  CFLAGS="${CFLAGS/-O2/-O3} -fno-semantic-interposition"
+  LDFLAGS+=" -Wl,-Bsymbolic-functions"
+
+  # Inject gvdb
+  export MESON_PACKAGE_CACHE_DIR="$srcdir"
+
+  arch-meson mutter build "${meson_options[@]}"
+  meson compile -C build
+}
+
+package() {
+  meson install -C build --no-rebuild --destdir "$pkgdir"
+
+  # The devkit ships in Arch's separate mutter-devkit package; leave it out so
+  # the two cannot conflict.
+  rm -rf "$pkgdir"/usr/lib/mutter-devkit
+  rm -f "$pkgdir"/usr/share/applications/org.gnome.Mutter.Mdk.desktop
+  rm -f "$pkgdir"/usr/share/icons/hicolor/scalable/apps/org.gnome.Mutter.Mdk.Devel.svg
+  rm -f "$pkgdir"/usr/share/icons/hicolor/scalable/apps/org.gnome.Mutter.Mdk.svg
+  rm -f "$pkgdir"/usr/share/icons/hicolor/symbolic/apps/org.gnome.Mutter.Mdk-symbolic.svg
+}
+
+# vim:set sw=2 sts=-1 et:

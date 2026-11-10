@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Underscale
+GenericName=External Display Size
+Comment=Adjust the picture size and scale of external displays
+Exec=underscale
+Icon=video-display-symbolic
+Categories=Settings;HardwareSettings;GTK;
+Keywords=underscan;overscan;tv;display;monitor;scale;hdmi;
+StartupNotify=true

@@ -1,0 +1,11 @@
+# Upstream sources fetched for patching; not part of this repo
+vendor/
+# makepkg downloads and output
+*.pkg.tar.zst
+/src/
+/pkg/
+mutter-underscale/src/
+mutter-underscale/pkg/
+mutter-underscale/mutter/
+mutter-underscale/gvdb/
+__pycache__/

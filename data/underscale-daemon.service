@@ -1,0 +1,12 @@
+[Unit]
+Description=Re-apply saved display underscan
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/underscale-daemon
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target
