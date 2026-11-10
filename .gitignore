@@ -9,3 +9,9 @@ mutter-underscale/pkg/
 mutter-underscale/mutter/
 mutter-underscale/gvdb/
 __pycache__/
+# container and distro build output
+/build/
+kwin-underscale/src/
+kwin-underscale/pkg/
+kwin-underscale/*.tar.xz
+kwin-underscale/*.patch

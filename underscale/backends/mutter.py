@@ -34,6 +34,11 @@ def _clean_error(error: GLib.Error) -> str:
 
 
 class MutterBackend(Backend):
+    unavailable_hint = (
+        "Underscan needs the mutter-underscale package. "
+        "Install it, then log out and back in."
+    )
+
     def __init__(self) -> None:
         try:
             self._proxy = Gio.DBusProxy.new_for_bus_sync(

@@ -1,0 +1,124 @@
+# KWin with overscan compensation on graphics drivers that have no overscan
+# property (Intel, NVIDIA). Based on the Arch Linux kwin 6.8.2-2 PKGBUILD;
+# replaces the stock package.
+#
+# UNTESTED: this builds, but has not been run on real hardware yet.
+#
+# Build:    makepkg -s
+# Install:  sudo pacman -U kwin-underscale-*.pkg.tar.zst   (then log out and in)
+# Revert:   sudo pacman -S kwin
+
+pkgname=kwin-underscale
+_pkgname=kwin
+pkgver=6.8.2
+pkgrel=1
+pkgdesc='An easy to use, but flexible, Wayland compositor, with overscan compensation on all drivers'
+arch=(x86_64)
+url='https://kde.org/plasma-desktop/'
+license=(LGPL-2.0-or-later)
+depends=(
+  aurorae
+  breeze
+  glibc
+  iio-sensor-proxy
+  plasma-activities
+  kauth
+  kcmutils
+  kcolorscheme
+  kconfig
+  kcoreaddons
+  kcrash
+  kdbusaddons
+  kdeclarative
+  kdecoration
+  kglobalaccel
+  kglobalacceld
+  kguiaddons
+  ki18n
+  kidletime
+  kirigami
+  kitemmodels
+  knewstuff
+  knighttime
+  knotifications
+  kpackage
+  kquickcharts
+  krunner
+  kscreenlocker
+  kservice
+  ksvg
+  kwayland
+  kwidgetsaddons
+  kwindowsystem
+  kxmlgui
+  lcms2
+  libcanberra
+  libdisplay-info
+  libdrm
+  libei
+  libepoxy
+  libevdev
+  libgcc
+  libinput
+  libpipewire
+  libqaccessibilityclient-qt6
+  libstdc++
+  libxcb
+  libxcvt
+  libxkbcommon
+  mesa
+  milou
+  pipewire-session-manager
+  libplasma
+  qt6-5compat
+  qt6-base
+  qt6-declarative
+  qt6-svg
+  qt6-tools
+  systemd-libs
+  vulkan-icd-loader
+  wayland
+  xcb-util-keysyms
+  xcb-util-wm
+)
+makedepends=(
+  extra-cmake-modules
+  kdoctools
+  krunner
+  plasma-wayland-protocols
+  python
+  vulkan-headers
+  wayland-protocols
+  xorg-xwayland
+)
+optdepends=(
+  'plasma-keyboard: virtual keyboard'
+)
+provides=("kwin=$pkgver")
+conflicts=(kwin)
+source=(
+  https://download.kde.org/stable/plasma/$pkgver/$_pkgname-$pkgver.tar.xz
+  https://invent.kde.org/plasma/kwin/-/commit/c9d720793bbcef9483ab290673032d39441c0e6f.patch
+  port.py
+)
+sha256sums=('ea5e68d957c7d70abed97222a592d4445fda29129e20942658badd224ee138b4'
+            '667d62447fdbc9fe0a760efee7c44e96c988384a5ad86fac49be7576d52010c2'
+            'SKIP')
+
+prepare() {
+  patch -d $_pkgname-$pkgver -p1 < c9d720793bbcef9483ab290673032d39441c0e6f.patch # Fix crashes (from Arch)
+  # The overscan change is applied by a script, shared with the Fedora and
+  # Debian builds, because those ship other KWin versions.
+  python port.py $_pkgname-$pkgver
+}
+
+build() {
+  cmake -B build -S $_pkgname-$pkgver \
+    -DKDE_INSTALL_LIBEXECDIR=lib \
+    -DBUILD_TESTING=OFF
+  cmake --build build
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+}

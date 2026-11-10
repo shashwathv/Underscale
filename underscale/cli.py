@@ -38,7 +38,7 @@ def cmd_list(backend, _store, _args) -> int:
         if display.supports_underscan:
             print(f"    underscan   {display.underscan * 100:.1f}%")
         elif not display.builtin:
-            print("    underscan   unavailable (needs mutter-underscale)")
+            print("    underscan   unavailable")
     return 0
 
 
@@ -54,7 +54,7 @@ def cmd_set(backend, store, args) -> int:
     display = backend.find_display(args.display)
     amount = min(args.amount, backend.max_underscan)
     backend.set_underscan(display, amount)
-    if not args.no_save:
+    if not args.no_save and not backend.persists_settings:
         store.set_underscan(display, amount)
     print(f"{display.name}: underscan {amount * 100:.1f}%")
     return 0

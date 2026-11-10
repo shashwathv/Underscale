@@ -86,7 +86,7 @@ class Window(Adw.ApplicationWindow):
 
         self.underscan_unavailable = Adw.ActionRow(
             title="Not available",
-            subtitle="Underscan needs the mutter-underscale package. Install it, then log out and back in.",
+            subtitle=backend.unavailable_hint,
         )
         self.underscan_group.add(self.underscan_unavailable)
         self.underscan_row = row
@@ -214,7 +214,8 @@ class Window(Adw.ApplicationWindow):
 
     def _save(self, display: Display, amount: float) -> bool:
         self._save_source = 0
-        self.store.set_underscan(display, amount)
+        if not self.backend.persists_settings:
+            self.store.set_underscan(display, amount)
         return GLib.SOURCE_REMOVE
 
     # -- scale ------------------------------------------------------------

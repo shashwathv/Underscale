@@ -45,6 +45,10 @@ def main() -> int:
         return 1
     store = Store()
 
+    if backend.persists_settings:
+        print("underscale-daemon: this desktop restores display settings itself; nothing to do")
+        return 0
+
     pending = {"id": 0}
 
     def run() -> bool:

@@ -45,6 +45,11 @@ class Display:
 class Backend(ABC):
     #: Largest underscan amount the backend accepts (fraction of the picture).
     max_underscan: float = 0.25
+    #: True when the desktop stores and restores underscan itself, so the
+    #: daemon must leave it alone.
+    persists_settings: bool = False
+    #: What the user needs when a display cannot be underscanned.
+    unavailable_hint: str = "This display cannot be underscanned."
 
     @abstractmethod
     def list_displays(self) -> list[Display]: ...
